@@ -116,7 +116,8 @@ async def on_message(message):
             try:
                 vc = await message.author.voice.channel.connect()
 
-            except:
+            except Exception as error:
+                print(error)
                 errormessage = await message.channel.send('Debes estar conectado a un canal')
                 await errormessage.delete(delay=3)
                 return
@@ -158,7 +159,7 @@ async def on_message(message):
                     source = getSongSource(url['entries'][0]['search'])
                     queue.append(source)
 
-            elif url['mediaSource'] == 'spotify':
+            elif url['mediaSource'] in ['spotify', 'tidal']:
                 if url['type'] == 'song':
                     source = getSongSource(url['entries'][0]['search'])
                     source['title'] = url['entries'][0]['title']
@@ -167,6 +168,7 @@ async def on_message(message):
                 if url['type'] == 'playlist':
                     for song in url['entries']:
                         queue.append({'extracted': False, 'title': song['title'], 'search': song['search']})
+
 
             if url == 'Not YTL':
                 errormessage = await message.channel.send('Ese no es un link de Youtube, pillín ;)')

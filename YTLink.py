@@ -2,10 +2,16 @@ import os
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from dotenv import load_dotenv
+from TidalSource import getTidalTrack, getTidalPlaylist
+import requests
+import base64
 
 load_dotenv('.env')
 SpotifyClient = os.getenv('SPOTIFY_CLIENT')
 SpotifySecret = os.getenv('SPOTIFY_SECRET')
+
+
+
 
 SpotiApi = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SpotifyClient, client_secret=SpotifySecret))
 
@@ -17,7 +23,9 @@ def YTid(link):
 
     if link.startswith('www.', 0, 5):
         link = link[4:]
-
+    
+    if link.startswith('music.youtube.com', 0, 5):
+        link = link[6:]
 
     if link.startswith('youtube.com', 0, 11):
         
@@ -53,7 +61,7 @@ def YTid(link):
         if link.startswith('track', 0, 10):
             song = SpotiApi.track(original)
             song = {'title': song['name'], 'search': song['artists'][0]['name'] + ' ' + song['name'], 'url': original}
-            return {'mediaSource': 'spotify', 'type': 'song', 'url': 'original', 'entries': [song]}
+            return {'mediaSource': 'spotify', 'type': 'song', 'url': original, 'entries': [song]}
         
         
         elif link.startswith('playlist', 0, 10):
@@ -63,6 +71,20 @@ def YTid(link):
                 playlist.append({'title': track['track']['name'], 'search': track['track']['artists'][0]['name'] + ' ' + track['track']['name']})
             
             return {'mediaSource': 'spotify', 'type': 'playlist', 'url': original, 'entries': playlist}
+        
+    elif link.startswith('tidal.com', 0, 10):
+        link = link[10:] 
+        if link.startswith('browse/track'):
+
+            songId = link[13:-2]
+            song = getTidalTrack(songId)
+            return {'mediaSource': 'tidal', 'type': 'song', 'url': original, 'entries': [song]}
+
+        elif link.startswith('playlist'):
+            playlistId = link[9:]
+            playlist = getTidalPlaylist(playlistId)
+            return {'mediaSource': 'tidal', 'type': 'playlist', 'url': original, 'entries': playlist}
+            
 
     #if the input isn't a link, it is considered a search instead of a link
     else:
@@ -70,7 +92,9 @@ def YTid(link):
         query = {'search' : original}
         return {'mediaSource': 'youtube', 'type': 'search', 'entries': [query]}
 
-    
+
+# https://tidal.com/browse/track/55130639?u
+# https://tidal.com/playlist/edf3b7d2-cb42-41d7-93c0-afa2a395521b
 
 
 
