@@ -1,9 +1,11 @@
 import os
+import time
 import asyncio
 import discord
 from discord import FFmpegPCMAudio
 from discord.player import FFmpegOpusAudio
 from dotenv import load_dotenv
+from aiohttp import web
 import YTLink as ytl
 from YTSource import getSongSource, getPlaylistSource
 
@@ -15,6 +17,35 @@ meses = {1:'Enero', 2:'Febrero', 3:'Marzo', 4:'Abril', 5:'Mayo', 6:'Junio', 7:'J
 client = discord.Client(intents=intents)
 idserver = 881368444791054386 
 queue = []
+
+START = time.time()
+stats = {"commands": 0}
+_status_started = False
+
+
+# JSON status endpoint consumed by the kappa-dashboard "discord" widget.
+async def status(request):
+    return web.json_response({
+        "connected": client.is_ready() and not client.is_closed(),
+        "latency_ms": round(client.latency * 1000),
+        "guilds": len(client.guilds),
+        "users": sum(g.member_count or 0 for g in client.guilds),
+        "commands": stats["commands"],
+        "queue_len": len(queue),
+        "uptime_s": int(time.time() - START),
+        "ts": time.time(),
+    })
+
+
+async def start_status_server():
+    app = web.Application()
+    app.router.add_get("/status", status)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    host = os.getenv("STATUS_HOST", "0.0.0.0")
+    port = int(os.getenv("STATUS_PORT", "8099"))
+    await web.TCPSite(runner, host, port).start()
+    print(f"Status endpoint listening on http://{host}:{port}/status")
 
 ## The function to check the state of the playlist and return a message
 def check_playlist(queue):
@@ -88,6 +119,10 @@ def check_queue(voiceclient, playlistchannel):
 ## Sets bot's configuration 
 @client.event
 async def on_ready():
+    global _status_started
+    if not _status_started:
+        _status_started = True
+        asyncio.create_task(start_status_server())
     testguild = client.get_guild(idserver)
     game = discord.Game('Gwagwa')
     await client.change_presence(activity=game)
@@ -126,15 +161,19 @@ async def on_message(message):
 
         if message.content.lower() == 'pause' or message.content.lower() == 'pausa':
             vc.pause()
+            stats["commands"] += 1
 
         elif message.content == 'resume':
             vc.resume()
+            stats["commands"] += 1
 
         elif message.content == 'skip':
             vc.stop()
+            stats["commands"] += 1
 
         elif message.content == 'clear':
             queue = []
+            stats["commands"] += 1
             await consolemessage.edit(content='No hay nada en la cola de reproducción. \nAgrega canciones escribiendo links de YouTube en el chat.')
 
 
@@ -175,7 +214,8 @@ async def on_message(message):
                 await errormessage.delete(delay=3)
                 return
 
-
+            ## Counts each handled link/playlist request
+            stats["commands"] += 1
 
             ## Declares the configuration for ytdl and opusfromprobe
             FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
