@@ -5,5 +5,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      CONFIG_PATH: /data/config.json
+    volumes:
+      - bot-config:/data
     ports:
       - "127.0.0.1:8099:8099"
+
+volumes:
+  bot-config:

@@ -1,26 +1,69 @@
 import os
+import json
 import time
 import asyncio
+import logging
 import discord
-from discord import FFmpegPCMAudio
-from discord.player import FFmpegOpusAudio
 from dotenv import load_dotenv
 from aiohttp import web
 import YTLink as ytl
 from YTSource import getSongSource, getPlaylistSource
 
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("guevoncita")
+
 load_dotenv('.env')
 TOKEN = os.getenv('DISCORD_TOKEN')
+CONFIG_PATH = os.getenv('CONFIG_PATH', 'config.json')
 intents = discord.Intents.all()
-meses = {1:'Enero', 2:'Febrero', 3:'Marzo', 4:'Abril', 5:'Mayo', 6:'Junio', 7:'Julio', 8:'Agosto', 9:'Septiembre', 10:'Octubre', 11:'Noviembre', 12:'Diciembre'}
 client = discord.Client(intents=intents)
-idserver = 881368444791054386 
-queue = []
 
 START = time.time()
 stats = {"commands": 0}
 _status_started = False
+
+# Seeds the previously hardcoded single-server setup so the current server
+# keeps working after upgrading to multi-guild config.
+LEGACY_GUILD = 881368444791054386
+LEGACY_CHANNEL = 890351893224755220
+LEGACY_CONSOLE = 890656775915835392
+
+FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+
+_config = {}
+_guilds = {}
+
+
+class GuildState:
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        self.queue = []
+        self.lock = asyncio.Lock()
+        self.console_message = None
+        self.prefetching = False
+
+
+def state_for(guild_id):
+    state = _guilds.get(guild_id)
+    if state is None:
+        state = GuildState(guild_id)
+        _guilds[guild_id] = state
+    return state
+
+
+def load_config():
+    global _config
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            _config = {int(k): v for k, v in json.load(f).items()}
+    else:
+        _config = {LEGACY_GUILD: {"channel_id": LEGACY_CHANNEL, "console_message_id": LEGACY_CONSOLE}}
+
+
+def save_config():
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(_config, f, indent=2)
 
 
 # JSON status endpoint consumed by the kappa-dashboard "discord" widget.
@@ -31,7 +74,7 @@ async def status(request):
         "guilds": len(client.guilds),
         "users": sum(g.member_count or 0 for g in client.guilds),
         "commands": stats["commands"],
-        "queue_len": len(queue),
+        "queue_len": sum(len(s.queue) for s in _guilds.values()),
         "uptime_s": int(time.time() - START),
         "ts": time.time(),
     })
@@ -45,209 +88,250 @@ async def start_status_server():
     host = os.getenv("STATUS_HOST", "0.0.0.0")
     port = int(os.getenv("STATUS_PORT", "8099"))
     await web.TCPSite(runner, host, port).start()
-    print(f"Status endpoint listening on http://{host}:{port}/status")
+    log.info("Status endpoint listening on http://%s:%s/status", host, port)
 
-## The function to check the state of the playlist and return a message
+
 def check_playlist(queue):
-
-    ## If the queue has more than 10 entries
+    if not queue:
+        return ('No hay nada en la cola de reproducción. \n'
+                'Agrega canciones escribiendo links de YouTube en el chat.')
     if len(queue) > 10:
-
-        playlistmessage = 'La playlist es:\n y ' + str(len(queue) - 10) + ' canciones más \n'
-        for songplace in range(10):
-            playlistmessage += str(10-songplace) + '.- ' + queue[9 - songplace]['title'] + '\n'
-
-    ## If the queue has 10 or less entries
-    elif len(queue) <= 10 and len(queue) != 0:
-
-        playlistmessage = 'La playlist es: \n'
-        for songplace in range(len(queue)):
-            playlistmessage += str(len(queue)-songplace) + '.- ' + queue[len(queue) - 1 - songplace]['title'] + '\n'       
-
-    ## If the queue doesn't have any entry
-    else:
-
-        playlistmessage = 'No hay nada en la cola de reproducción. \nAgrega canciones escribiendo links de YouTube en el chat.'       
-    ## Returns the message created with the queue info 
-    return playlistmessage
+        lines = [f'{10 - i}.- ' + queue[9 - i]['title'] for i in range(10)]
+        return 'La playlist es:\n y ' + str(len(queue) - 10) + ' canciones más \n' + '\n'.join(lines)
+    lines = [f'{len(queue) - i}.- ' + queue[len(queue) - 1 - i]['title'] for i in range(len(queue))]
+    return 'La playlist es: \n' + '\n'.join(lines)
 
 
-# Checks the music queue when the current song stops or is stopped,
-# in order to play the next one in the queue
-def check_queue(voiceclient, playlistchannel):
-    global queue
-    if queue != []:
-        FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
-        source = queue.pop(0)
-
-        if source['extracted'] == False:
-            source = getSongSource(source['search'])
-
-        nextaudio = discord.FFmpegOpusAudio.from_probe(source['source'], method='fallback', **FFMPEG_OPTIONS)
-        fut = asyncio.run_coroutine_threadsafe(nextaudio, client.loop)
+async def ensure_console(guild, state):
+    if state.console_message is not None:
+        return state.console_message
+    cfg = _config.get(guild.id)
+    if not cfg:
+        return None
+    channel = guild.get_channel(cfg['channel_id'])
+    if channel is None:
+        return None
+    msg_id = cfg.get('console_message_id')
+    if msg_id:
         try:
-            nextaudio = fut.result()
-            voiceclient.play(nextaudio, after=lambda x=None: check_queue(voiceclient, playlistchannel))
-        except:
+            state.console_message = await channel.fetch_message(msg_id)
+            return state.console_message
+        except discord.NotFound:
             pass
-
-        embedmessage = 'Ahora estás escuchando: ' + source['title']
-        nowplaying = discord.Embed(title=embedmessage, url= 'https://www.youtube.com/watch?v=' + source['id'])
-        nowplaying.set_image(url=source['thumbnail'])
-        coro = playlistchannel.edit(content=check_playlist(queue), embed=nowplaying)  
-        fut = asyncio.run_coroutine_threadsafe(coro, client.loop)    
-        try:
-             fut.result()
-        except:
-            pass
-
-        if queue != []:
-            if queue[0]['extracted'] == False:
-                getSongSource(queue[0]['search'])
-    else:
-        embedmessage = 'No estoy tocando nada en este momento. \nColoca alguna canción escribiendo su link de YouTube en el chat'
-        nowplaying = discord.Embed(title=embedmessage)
-        nowplaying.set_image(url='https://i.ytimg.com/vi/86O_FZ1Ph4I/maxresdefault.jpg')
-        coro = playlistchannel.edit(content='', embed=nowplaying)  
-        fut = asyncio.run_coroutine_threadsafe(coro, client.loop)    
-        try:
-             fut.result()
-        except:
-            pass
+    state.console_message = await channel.send('Cola de reproducción lista.')
+    cfg['console_message_id'] = state.console_message.id
+    save_config()
+    return state.console_message
 
 
-## Sets bot's configuration 
+async def edit_console(state, **kwargs):
+    msg = state.console_message
+    if msg is None:
+        return
+    try:
+        await msg.edit(**kwargs)
+    except discord.NotFound:
+        state.console_message = None
+
+
+# Runs in the voice thread when a track ends, so it hops back onto the event loop.
+def after_play(guild):
+    fut = asyncio.run_coroutine_threadsafe(play_next(guild), client.loop)
+    try:
+        fut.result()
+    except Exception:
+        log.exception("play_next failed for guild %s", guild.id)
+
+
+async def prefetch_next(state):
+    async with state.lock:
+        if state.prefetching or not state.queue or state.queue[0]['extracted']:
+            return
+        state.prefetching = True
+        search = state.queue[0]['search']
+    source = await asyncio.to_thread(getSongSource, search)
+    async with state.lock:
+        state.prefetching = False
+        if state.queue and state.queue[0].get('search') == search and not state.queue[0]['extracted']:
+            state.queue[0] = source
+
+
+async def play_next(guild):
+    state = state_for(guild.id)
+    async with state.lock:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return
+        console = await ensure_console(guild, state)
+
+        if not state.queue:
+            if console is not None:
+                embed = discord.Embed(title='No estoy tocando nada en este momento. \n'
+                                            'Coloca alguna canción escribiendo su link de YouTube en el chat')
+                embed.set_image(url='https://i.ytimg.com/vi/86O_FZ1Ph4I/maxresdefault.jpg')
+                await edit_console(state, content='', embed=embed)
+            return
+
+        source = state.queue.pop(0)
+        if not source['extracted']:
+            source = await asyncio.to_thread(getSongSource, source['search'])
+
+        audio = await discord.FFmpegOpusAudio.from_probe(source['source'], method='fallback', **FFMPEG_OPTIONS)
+        vc.play(audio, after=lambda e=None: after_play(guild))
+
+        if console is not None:
+            embed = discord.Embed(title='Ahora estás escuchando: ' + source['title'],
+                                  url='https://www.youtube.com/watch?v=' + source['id'])
+            embed.set_image(url=source['thumbnail'])
+            await edit_console(state, content=check_playlist(state.queue), embed=embed)
+
+        if state.queue and not state.queue[0]['extracted']:
+            asyncio.create_task(prefetch_next(state))
+
+
+async def sources_from_url(url):
+    media = url['mediaSource']
+    sources = []
+    if media == 'youtube':
+        if url['type'] in ('short', 'song'):
+            sources.append(await asyncio.to_thread(getSongSource, url['entries'][0]['url']))
+        elif url['type'] == 'playlist':
+            sources.extend(await asyncio.to_thread(getPlaylistSource, url['entries'][0]['url']))
+        elif url['type'] == 'search':
+            sources.append(await asyncio.to_thread(getSongSource, url['entries'][0]['search']))
+    elif media in ('spotify', 'tidal'):
+        if url['type'] == 'song':
+            source = await asyncio.to_thread(getSongSource, url['entries'][0]['search'])
+            source['title'] = url['entries'][0]['title']
+            sources.append(source)
+        elif url['type'] == 'playlist':
+            for song in url['entries']:
+                sources.append({'extracted': False, 'title': song['title'], 'search': song['search']})
+    return sources
+
+
+async def handle_setchannel(message):
+    if message.guild is None:
+        return
+    if not message.author.guild_permissions.manage_guild:
+        err = await message.channel.send('Necesitas el permiso "Gestionar servidor" para configurar el canal.')
+        await err.delete(delay=5)
+        return
+    if not message.channel_mentions:
+        err = await message.channel.send('Uso: !setchannel #canal')
+        await err.delete(delay=5)
+        return
+
+    channel = message.channel_mentions[0]
+    _config[message.guild.id] = {'channel_id': channel.id}
+    save_config()
+    state_for(message.guild.id).console_message = None
+
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+    await ensure_console(message.guild, state_for(message.guild.id))
+    await message.channel.send(f'Canal de música configurado: {channel.mention}', delete_after=5)
+
+
 @client.event
 async def on_ready():
     global _status_started
     if not _status_started:
         _status_started = True
         asyncio.create_task(start_status_server())
-    testguild = client.get_guild(idserver)
-    game = discord.Game('Gwagwa')
-    await client.change_presence(activity=game)
-    print('Güevoncita se conectó')
 
-    music_channel = testguild.get_channel(890351893224755220)
+    await client.change_presence(activity=discord.Game('Gwagwa'))
+    log.info('Güevoncita se conectó como %s', client.user)
 
-    async for message in music_channel.history(limit=200):
-        if message.id not in [890656762594725908, 890656775915835392]:
-            await message.delete()
+    # Tidy each configured music channel, preserving the console message.
+    for guild_id, cfg in list(_config.items()):
+        guild = client.get_guild(guild_id)
+        if guild is None:
+            continue
+        channel = guild.get_channel(cfg['channel_id'])
+        if channel is None:
+            continue
+        keep = {cfg.get('console_message_id')}
+        try:
+            async for msg in channel.history(limit=200):
+                if msg.id not in keep:
+                    await msg.delete()
+        except discord.HTTPException:
+            pass
+
 
 @client.event
 async def on_message(message):
-    global queue
-
-    ## Ignores the message if the author is the bot
-    if message.author == client.user:
+    if message.author == client.user or message.author.bot:
         return
-    ## If the message comes from the music channel
-    if message.channel.id == 890351893224755220: 
-        await message.delete()
-        consolemessage = await message.channel.fetch_message(890656775915835392) 
-        try:
-            vc = client.voice_clients[0]
-        except:
-            try:
-                vc = await message.author.voice.channel.connect()
 
-            except Exception as error:
-                print(error)
-                errormessage = await message.channel.send('Debes estar conectado a un canal')
-                await errormessage.delete(delay=3)
-                return
+    content = message.content.strip()
+    if content.startswith('!setchannel'):
+        await handle_setchannel(message)
+        return
 
-        ##Simple commands to workaround with the music player
+    cfg = _config.get(message.guild.id) if message.guild else None
+    if not cfg or message.channel.id != cfg['channel_id']:
+        return
 
-        if message.content.lower() == 'pause' or message.content.lower() == 'pausa':
-            vc.pause()
-            stats["commands"] += 1
+    await message.delete()
+    guild = message.guild
+    state = state_for(guild.id)
+    await ensure_console(guild, state)
 
-        elif message.content == 'resume':
-            vc.resume()
-            stats["commands"] += 1
+    vc = guild.voice_client
+    if vc is None:
+        author_voice = getattr(message.author.voice, 'channel', None)
+        if author_voice is None:
+            err = await message.channel.send('Debes estar conectado a un canal')
+            await err.delete(delay=3)
+            return
+        vc = await author_voice.connect()
 
-        elif message.content == 'skip':
-            vc.stop()
-            stats["commands"] += 1
+    low = content.lower()
+    if low in ('pause', 'pausa'):
+        vc.pause()
+        stats["commands"] += 1
+        return
+    if low == 'resume':
+        vc.resume()
+        stats["commands"] += 1
+        return
+    if low == 'skip':
+        vc.stop()
+        stats["commands"] += 1
+        return
+    if low == 'clear':
+        async with state.lock:
+            state.queue.clear()
+        stats["commands"] += 1
+        await edit_console(state, content='No hay nada en la cola de reproducción. \n'
+                                          'Agrega canciones escribiendo links de YouTube en el chat.', embed=None)
+        return
 
-        elif message.content == 'clear':
-            queue = []
-            stats["commands"] += 1
-            await consolemessage.edit(content='No hay nada en la cola de reproducción. \nAgrega canciones escribiendo links de YouTube en el chat.')
+    try:
+        url = await asyncio.to_thread(ytl.YTid, content)
+        sources = await sources_from_url(url)
+    except Exception:
+        log.exception("failed to resolve %r", content)
+        err = await message.channel.send('No pude procesar ese link, pillín ;)')
+        await err.delete(delay=3)
+        return
 
+    async with state.lock:
+        state.queue.extend(sources)
+        should_start = not vc.is_playing() and not vc.is_paused()
+        if not should_start:
+            await edit_console(state, content=check_playlist(state.queue))
 
-        else:
+    stats["commands"] += 1
 
-            url = ytl.YTid(message.content)
-            if url['mediaSource'] == 'youtube':
-                if url['type'] == 'short':
-                    source = getSongSource(url['entries'][0]['url'])
-                    queue.append(source)
-
-                if url['type'] == 'song':
-                    source = getSongSource(url['entries'][0]['url'])
-                    queue.append(source)
-
-                if url['type'] == 'playlist':
-                    sources = getPlaylistSource(url['entries'][0]['url'])
-                    for source in sources:
-                        queue.append(source)
-
-                if url['type'] == 'search':
-                    source = getSongSource(url['entries'][0]['search'])
-                    queue.append(source)
-
-            elif url['mediaSource'] in ['spotify', 'tidal']:
-                if url['type'] == 'song':
-                    source = getSongSource(url['entries'][0]['search'])
-                    source['title'] = url['entries'][0]['title']
-                    queue.append(source)
-
-                if url['type'] == 'playlist':
-                    for song in url['entries']:
-                        queue.append({'extracted': False, 'title': song['title'], 'search': song['search']})
+    if should_start:
+        await play_next(guild)
 
 
-            if url == 'Not YTL':
-                errormessage = await message.channel.send('Ese no es un link de Youtube, pillín ;)')
-                await errormessage.delete(delay=3)
-                return
-
-            ## Counts each handled link/playlist request
-            stats["commands"] += 1
-
-            ## Declares the configuration for ytdl and opusfromprobe
-            FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
-            
-
-            ## If the bot isn't playing any music
-            if vc.is_playing() == False:
-                source = queue.pop(0)
-                if source['extracted'] == False:
-                    source = getSongSource(source['search'])
-
-                embedmessage = 'Ahora estás escuchando: ' + source['title']
-                newurl = 'https://www.youtube.com/watch?v=' + source['id']
-                nowplaying = discord.Embed(title=embedmessage, url=newurl)
-                nowplaying.set_image(url=source['thumbnail'])
-                await consolemessage.edit(content=check_playlist(queue), embed=nowplaying)  
-
-
-                audio = await discord.FFmpegOpusAudio.from_probe(source['source'], method='fallback', **FFMPEG_OPTIONS)
-                vc.play(audio, after=lambda x=None: check_queue(vc, consolemessage))     
-                
-                if queue != []:
-                    if queue[0]['extracted'] == False:
-                        queue[0] = getSongSource(queue[0]['search'])
-
-            elif vc.is_playing() == True:       
-
-                await consolemessage.edit(content=check_playlist(queue))  
-
-                if queue[0]['extracted'] == False:
-                        queue[0] = getSongSource(queue[0]['search'])
-
-
+load_config()
 client.run(TOKEN)
-

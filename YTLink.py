@@ -1,107 +1,112 @@
 import os
+from urllib.parse import urlparse, parse_qs
+
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from dotenv import load_dotenv
-from TidalSource import getTidalTrack, getTidalPlaylist
-import requests
-import base64
 
 load_dotenv('.env')
 SpotifyClient = os.getenv('SPOTIFY_CLIENT')
 SpotifySecret = os.getenv('SPOTIFY_SECRET')
 
+_spoti_api = None
 
 
+def _spotify_client():
+    global _spoti_api
+    if _spoti_api is None:
+        _spoti_api = spotipy.Spotify(
+            auth_manager=SpotifyClientCredentials(client_id=SpotifyClient, client_secret=SpotifySecret))
+    return _spoti_api
 
-SpotiApi = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SpotifyClient, client_secret=SpotifySecret))
 
-## Function to process links
+def _youtube(original, parsed, query):
+    path = parsed.path
+    if path.startswith('/playlist') or 'list' in query:
+        return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original,
+                'entries': [{'url': original}]}
+    if path.startswith('/shorts/'):
+        return {'mediaSource': 'youtube', 'type': 'short', 'url': original,
+                'entries': [{'url': original}]}
+    vid = query.get('v', [None])[0]
+    if vid:
+        return {'mediaSource': 'youtube', 'type': 'song', 'url': original,
+                'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
+    return None
+
+
+def _spotify(original, parsed):
+    parts = [p for p in parsed.path.split('/') if p]
+    if parts and parts[0].startswith('intl-'):
+        parts = parts[1:]
+    if parts and parts[0] == 'track':
+        track = _spotify_client().track(original)
+        song = {'title': track['name'], 'search': track['artists'][0]['name'] + ' ' + track['name'],
+                'url': original}
+        return {'mediaSource': 'spotify', 'type': 'song', 'url': original, 'entries': [song]}
+    if parts and parts[0] == 'playlist':
+        playlist = []
+        for track in _spotify_client().playlist(original)['tracks']['items']:
+            playlist.append({'title': track['track']['name'],
+                             'search': track['track']['artists'][0]['name'] + ' ' + track['track']['name']})
+        return {'mediaSource': 'spotify', 'type': 'playlist', 'url': original, 'entries': playlist}
+    return None
+
+
+def _tidal(original, parsed):
+    from TidalSource import getTidalTrack, getTidalPlaylist
+    parts = [p for p in parsed.path.split('/') if p]
+    if parts[:2] == ['browse', 'track'] and len(parts) >= 3:
+        return {'mediaSource': 'tidal', 'type': 'song', 'url': original,
+                'entries': [getTidalTrack(parts[2])]}
+    if parts and parts[0] == 'playlist' and len(parts) >= 2:
+        return {'mediaSource': 'tidal', 'type': 'playlist', 'url': original,
+                'entries': getTidalPlaylist(parts[1])}
+    return None
+
+
+## Function to process links or search text
 def YTid(link):
-    original=link 
-    if link.startswith('https://', 0, 8):
-        link = link[8:]
+    original = link.strip()
+    candidate = original if '://' in original else 'https://' + original
+    parsed = urlparse(candidate)
+    host = parsed.netloc.lower()
+    if host.startswith('www.'):
+        host = host[4:]
+    query = parse_qs(parsed.query)
 
-    if link.startswith('www.', 0, 5):
-        link = link[4:]
-    
-    if link.startswith('music.youtube.com', 0, 5):
-        link = link[6:]
-
-    if link.startswith('youtube.com', 0, 11):
-        
-        if link[12:20] == 'playlist':
-            playlist = {'url': original}
-            return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original, 'entries':[playlist]}
-        
-        elif link[12:18] == 'shorts':
-            playlist = {'url': original}
-            return {'mediaSource': 'youtube', 'type': 'short', 'url': original, 'entries':[playlist]}
-
+    result = None
+    if host.endswith('youtube.com') or host == 'youtu.be':
+        if host == 'youtu.be':
+            vid = parsed.path.lstrip('/')
+            result = {'mediaSource': 'youtube', 'type': 'song', 'url': original,
+                      'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
         else:
-            id = link[20:31]
+            result = _youtube(original, parsed, query)
+    elif host.endswith('spotify.com'):
+        result = _spotify(original, parsed)
+    elif host.endswith('tidal.com'):
+        result = _tidal(original, parsed)
 
-            if link[31:36] == '&list':
-                playlist = {'url': original}
-                return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original, 'entries': [playlist]}
+    if result is not None:
+        return result
 
-            else:
-                song = {'url': 'https://www.youtube.com/watch?v=' + id}
-                return {'mediaSource': 'youtube', 'type': 'song', 'url': original, 'entries': [song]}
-
-
-    elif link.startswith('youtu.be', 0, 8):
-        id = link[9:20]
-        song = {'url': 'https://www.youtube.com/watch?v=' + id}
-        return {'mediaSource': 'youtube', 'type': 'song', 'url': original, 'entries': [song]}
-
-    #If the link is from spotify, will check if the link is a track or a playlist
-    # in each case, it will obtain the data from the spotify api
-    elif link.startswith('open.spotify.com', 0, 20):
-        link =  link[17:]
-        if link.startswith('track', 0, 10):
-            song = SpotiApi.track(original)
-            song = {'title': song['name'], 'search': song['artists'][0]['name'] + ' ' + song['name'], 'url': original}
-            return {'mediaSource': 'spotify', 'type': 'song', 'url': original, 'entries': [song]}
-        
-        
-        elif link.startswith('playlist', 0, 10):
-            playlist = []
-            tracks = SpotiApi.playlist(original)
-            for track in tracks['tracks']['items']:
-                playlist.append({'title': track['track']['name'], 'search': track['track']['artists'][0]['name'] + ' ' + track['track']['name']})
-            
-            return {'mediaSource': 'spotify', 'type': 'playlist', 'url': original, 'entries': playlist}
-        
-    elif link.startswith('tidal.com', 0, 10):
-        link = link[10:] 
-        if link.startswith('browse/track'):
-
-            songId = link[13:-2]
-            song = getTidalTrack(songId)
-            return {'mediaSource': 'tidal', 'type': 'song', 'url': original, 'entries': [song]}
-
-        elif link.startswith('playlist'):
-            playlistId = link[9:]
-            playlist = getTidalPlaylist(playlistId)
-            return {'mediaSource': 'tidal', 'type': 'playlist', 'url': original, 'entries': playlist}
-            
-
-    #if the input isn't a link, it is considered a search instead of a link
-    else:
-
-        query = {'search' : original}
-        return {'mediaSource': 'youtube', 'type': 'search', 'entries': [query]}
+    # Anything that isn't a recognised link is treated as a YouTube search.
+    return {'mediaSource': 'youtube', 'type': 'search', 'url': original,
+            'entries': [{'search': original}]}
 
 
-# https://tidal.com/browse/track/55130639?u
-# https://tidal.com/playlist/edf3b7d2-cb42-41d7-93c0-afa2a395521b
+def _demo():
+    assert YTid('https://www.youtube.com/watch?v=abc123')['type'] == 'song'
+    assert YTid('https://youtu.be/abc123')['type'] == 'song'
+    assert YTid('https://www.youtube.com/shorts/xyz')['type'] == 'short'
+    assert YTid('https://www.youtube.com/playlist?list=PL1')['type'] == 'playlist'
+    assert YTid('https://www.youtube.com/watch?v=a&list=PL1')['type'] == 'playlist'
+    assert YTid('https://music.youtube.com/watch?v=abc123')['type'] == 'song'
+    assert YTid('daft punk one more time')['type'] == 'search'
+    assert YTid('daft punk one more time')['mediaSource'] == 'youtube'
+    print('YTLink demo OK')
 
 
-
-
-
-
-
-
-
-
+if __name__ == '__main__':
+    _demo()
