@@ -25,7 +25,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy bot source
 COPY --chown=botuser:botuser . .
+RUN chmod +x docker-entrypoint.sh
 
 USER botuser
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["python", "main.py"]

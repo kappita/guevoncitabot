@@ -14,6 +14,7 @@ services:
       YTDL_COOKIEFILE: /data/cookies.txt
     volumes:
       - bot-config:/data
+      - ./cookies.txt:/cookies/cookies.txt:ro
     depends_on:
       - bgutil-provider
     ports:

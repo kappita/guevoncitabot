@@ -10,6 +10,7 @@ from aiohttp import web
 import YTLink as ytl
 import Birthdays as birthdays
 import Holidays as holidays
+import YTSource as yts
 from YTSource import getSongSource, getPlaylistSource
 
 
@@ -379,6 +380,7 @@ async def on_ready():
 
     await client.change_presence(activity=discord.Game('Gwagwa'))
     log.info('Güevoncita se conectó como %s', client.user)
+    log.info('yt-dlp config: %s', yts.describe())
 
     # Tidy each configured music channel, preserving the console message.
     for guild_id, cfg in list(_config.items()):

@@ -28,18 +28,38 @@ docker compose exec discord-bot yt-dlp -v "https://youtu.be/<id>"
 ### Cookies (optional)
 
 If the PO token alone is not enough (flagged IP, age-restricted or members-only
-videos), export a Netscape-format `cookies.txt` and place it in the bot's `/data`
-volume:
+videos), export a Netscape-format `cookies.txt` from a **throwaway** Google
+account (private window → log in → open `youtube.com/robots.txt` → export → close
+the window), then place it next to this compose file:
 
 ```sh
-docker cp ./cookies.txt discord-bot:/data/cookies.txt
+touch cookies.txt          # create it first so Docker mounts a file, not a dir
+chmod 644 cookies.txt
+# ...put your exported cookies in cookies.txt...
+docker compose up -d --build
+```
+
+`docker-compose.yml` mounts `./cookies.txt` **read-only** at `/cookies/cookies.txt`;
+`docker-entrypoint.sh` copies it to the writable `/data/cookies.txt` at startup.
+This is required because yt-dlp rewrites the cookie jar on exit (to persist
+rotated session cookies) and fails with `PermissionError` on a read-only file.
+`YTDL_COOKIEFILE` points at that writable copy and is only used if the file exists.
+
+To refresh expired cookies, replace `./cookies.txt` and restart:
+
+```sh
 docker compose restart discord-bot
 ```
 
-`YTDL_COOKIEFILE` (default `/data/cookies.txt`) is only used if the file exists.
+At startup the bot logs its yt-dlp config:
+
+```
+yt-dlp config: player_client=default,web_safari, pot_provider=http://bgutil-provider:4416, cookies=/data/cookies.txt (N cookies)
+```
 
 > Use a throwaway Google account. Sessions used by downloaders can be flagged,
 > and the file is a live login token in plain text — never commit it.
+
 
 ### Tuning
 

@@ -26,6 +26,17 @@ def _options(extract_flat):
     return options
 
 
+def describe():
+    if COOKIEFILE and os.path.isfile(COOKIEFILE):
+        with open(COOKIEFILE) as f:
+            count = sum(1 for line in f if line.strip() and not line.startswith('#'))
+        cookies = f'{COOKIEFILE} ({count} cookies)'
+    else:
+        cookies = 'none'
+    return (f'player_client={PLAYER_CLIENT or "yt-dlp default"}, '
+            f'pot_provider={POT_PROVIDER_URL or "none"}, cookies={cookies}')
+
+
 # Downloads the song data and returns it
 def getSongSource(link: str) -> dict:
     with yt_dlp.YoutubeDL(_options(False)) as ydl:
