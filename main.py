@@ -3,10 +3,13 @@ import json
 import time
 import asyncio
 import logging
+import datetime
 import discord
 from dotenv import load_dotenv
 from aiohttp import web
 import YTLink as ytl
+import Birthdays as birthdays
+import Holidays as holidays
 from YTSource import getSongSource, getPlaylistSource
 
 
@@ -91,6 +94,74 @@ async def start_status_server():
     log.info("Status endpoint listening on http://%s:%s/status", host, port)
 
 
+async def announce_birthdays(today):
+    celebrants = birthdays.birthdays_on(today.month, today.day)
+    if not celebrants:
+        return
+    for guild_id, cfg in list(_config.items()):
+        if cfg.get('last_birthday_announce') == today.isoformat():
+            continue
+        guild = client.get_guild(guild_id)
+        channel = guild.get_channel(cfg.get('channel_id')) if guild else None
+        if channel is None:
+            continue
+        members = [m for m in (guild.get_member(int(uid)) for uid in celebrants) if m]
+        if not members:
+            continue
+        mentions = ', '.join(m.mention for m in members)
+        try:
+            await channel.send(f'¡Feliz cumpleaños, {mentions}!')
+        except discord.HTTPException:
+            continue
+        cfg['last_birthday_announce'] = today.isoformat()
+        save_config()
+
+
+async def announce_holidays(today):
+    tomorrow = (today + datetime.timedelta(days=1)).isoformat()
+    title = holidays.on(tomorrow)
+    if not title:
+        return
+    for guild_id, cfg in list(_config.items()):
+        if cfg.get('last_holiday_announce') == tomorrow:
+            continue
+        guild = client.get_guild(guild_id)
+        channel = guild.get_channel(cfg.get('holiday_channel_id')) if guild else None
+        if channel is None:
+            continue
+        try:
+            await channel.send(f'Mañana es feriado: {title}.')
+        except discord.HTTPException:
+            continue
+        cfg['last_holiday_announce'] = tomorrow
+        save_config()
+
+
+async def announcer():
+    # Hourly check so a birthday added during the day still gets announced.
+    while not client.is_closed():
+        try:
+            today = datetime.date.today()
+            await announce_birthdays(today)
+            await announce_holidays(today)
+        except Exception:
+            log.exception("announcer failed")
+        await asyncio.sleep(3600)
+
+
+async def holiday_refresher():
+    # Re-scrape the holiday page monthly (and on every startup).
+    while not client.is_closed():
+        try:
+            await asyncio.to_thread(holidays.refresh)
+            log.info("Holidays refreshed")
+        except Exception:
+            log.exception("holiday refresh failed")
+            await asyncio.sleep(6 * 3600)
+            continue
+        await asyncio.sleep(30 * 24 * 3600)
+
+
 def check_playlist(queue):
     if not queue:
         return ('No hay nada en la cola de reproducción. \n'
@@ -108,7 +179,7 @@ async def ensure_console(guild, state):
     cfg = _config.get(guild.id)
     if not cfg:
         return None
-    channel = guild.get_channel(cfg['channel_id'])
+    channel = guild.get_channel(cfg.get('channel_id'))
     if channel is None:
         return None
     msg_id = cfg.get('console_message_id')
@@ -210,20 +281,66 @@ async def sources_from_url(url):
     return sources
 
 
-async def handle_setchannel(message):
+async def handle_birthday(message):
+    parts = message.content.split()
+    user_id = message.author.id
+    if len(parts) > 1 and parts[1].lower() in ('borrar', 'delete', 'clear', 'remove'):
+        birthdays.clear_birthday(user_id)
+        reply = 'Listo, olvidé tu cumpleaños.'
+    elif len(parts) > 1:
+        saved = birthdays.set_birthday(user_id, parts[1])
+        reply = f'Guardé tu cumpleaños: {saved}.' if saved else 'Formato inválido. Usa: !birthday DD/MM'
+    else:
+        saved = birthdays.get_birthday(user_id)
+        reply = f'Tu cumpleaños es el {saved}.' if saved else 'No tengo tu cumpleaños. Usa: !birthday DD/MM'
+
+    replymessage = await message.channel.send(reply)
+    await replymessage.delete(delay=10)
+
+
+async def handle_nextholiday(message):
+    holiday = holidays.next_holiday()
+    if holiday:
+        day = datetime.date.fromisoformat(holiday['date'])
+        reply = f'El próximo feriado es el {day.strftime("%d/%m/%Y")}: {holiday["title"]}.'
+    else:
+        reply = 'No tengo feriados guardados todavía.'
+    replymessage = await message.channel.send(reply)
+    await replymessage.delete(delay=10)
+
+
+async def handle_nextbirthday(message):
+    result = birthdays.next_birthday()
+    if result:
+        user_id, when = result
+        member = message.guild.get_member(int(user_id)) if message.guild else None
+        who = member.mention if member else f'<@{user_id}>'
+        reply = f'El próximo cumpleaños es el {when.strftime("%d/%m")} de {who}.'
+    else:
+        reply = 'No tengo cumpleaños guardados todavía.'
+    replymessage = await message.channel.send(reply)
+    await replymessage.delete(delay=10)
+
+
+async def resolve_target_channel(message, command):
     if message.guild is None:
-        return
+        return None
     if not message.author.guild_permissions.manage_guild:
         err = await message.channel.send('Necesitas el permiso "Gestionar servidor" para configurar el canal.')
         await err.delete(delay=5)
-        return
+        return None
     if not message.channel_mentions:
-        err = await message.channel.send('Uso: !setchannel #canal')
+        err = await message.channel.send(f'Uso: {command} #canal')
         await err.delete(delay=5)
-        return
+        return None
+    return message.channel_mentions[0]
 
-    channel = message.channel_mentions[0]
-    _config[message.guild.id] = {'channel_id': channel.id}
+
+async def handle_setchannel(message):
+    channel = await resolve_target_channel(message, '!setchannel')
+    if channel is None:
+        return
+    _config.setdefault(message.guild.id, {})['channel_id'] = channel.id
     save_config()
     state_for(message.guild.id).console_message = None
 
@@ -236,12 +353,29 @@ async def handle_setchannel(message):
     await message.channel.send(f'Canal de música configurado: {channel.mention}', delete_after=5)
 
 
+async def handle_setholidays(message):
+    channel = await resolve_target_channel(message, '!setholidays')
+    if channel is None:
+        return
+    _config.setdefault(message.guild.id, {})['holiday_channel_id'] = channel.id
+    save_config()
+
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+
+    await message.channel.send(f'Canal de feriados configurado: {channel.mention}', delete_after=5)
+
+
 @client.event
 async def on_ready():
     global _status_started
     if not _status_started:
         _status_started = True
         asyncio.create_task(start_status_server())
+        asyncio.create_task(announcer())
+        asyncio.create_task(holiday_refresher())
 
     await client.change_presence(activity=discord.Game('Gwagwa'))
     log.info('Güevoncita se conectó como %s', client.user)
@@ -251,7 +385,7 @@ async def on_ready():
         guild = client.get_guild(guild_id)
         if guild is None:
             continue
-        channel = guild.get_channel(cfg['channel_id'])
+        channel = guild.get_channel(cfg.get('channel_id'))
         if channel is None:
             continue
         keep = {cfg.get('console_message_id')}
@@ -272,9 +406,21 @@ async def on_message(message):
     if content.startswith('!setchannel'):
         await handle_setchannel(message)
         return
+    if content.startswith('!setholidays'):
+        await handle_setholidays(message)
+        return
+    if content.startswith('!birthday'):
+        await handle_birthday(message)
+        return
+    if content.startswith('!nextholiday'):
+        await handle_nextholiday(message)
+        return
+    if content.startswith('!nextbirthday'):
+        await handle_nextbirthday(message)
+        return
 
     cfg = _config.get(message.guild.id) if message.guild else None
-    if not cfg or message.channel.id != cfg['channel_id']:
+    if not cfg or message.channel.id != cfg.get('channel_id'):
         return
 
     await message.delete()

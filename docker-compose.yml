@@ -7,10 +7,26 @@ services:
       - .env
     environment:
       CONFIG_PATH: /data/config.json
+      BIRTHDAYS_PATH: /data/birthdays.json
+      HOLIDAYS_PATH: /data/holidays.json
+      YTDL_POT_PROVIDER_URL: http://bgutil-provider:4416
+      YTDL_PLAYER_CLIENT: default,web_safari
+      YTDL_COOKIEFILE: /data/cookies.txt
     volumes:
       - bot-config:/data
+    depends_on:
+      - bgutil-provider
     ports:
       - "127.0.0.1:8099:8099"
+
+  # Mints YouTube proof-of-origin tokens so yt-dlp clears the "Sign in to
+  # confirm you're not a bot" gate. Keep this version in sync with the
+  # bgutil-ytdlp-pot-provider pin in requirements.txt.
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.2
+    container_name: bgutil-provider
+    restart: unless-stopped
+    init: true
 
 volumes:
   bot-config:
