@@ -183,6 +183,10 @@ async def ensure_console(guild, state):
     channel = guild.get_channel(cfg.get('channel_id'))
     if channel is None:
         return None
+    # Discord silently strips embeds from messages sent without this permission.
+    if not channel.permissions_for(guild.me).embed_links:
+        log.warning("missing Embed Links permission in #%s (guild %s); the now-playing embed won't show",
+                    channel.name, guild.id)
     msg_id = cfg.get('console_message_id')
     if msg_id:
         try:
@@ -204,6 +208,15 @@ async def edit_console(state, **kwargs):
         await msg.edit(**kwargs)
     except discord.NotFound:
         state.console_message = None
+    except discord.HTTPException:
+        log.exception("failed to update console message in guild %s", state.guild_id)
+
+
+def now_playing_embed(source):
+    url = source.get('webpage_url') or 'https://www.youtube.com/watch?v=' + source['id']
+    embed = discord.Embed(title=('Ahora estás escuchando: ' + source['title'])[:256], url=url)
+    embed.set_image(url=source['thumbnail'])
+    return embed
 
 
 # Runs in the voice thread when a track ends, so it hops back onto the event loop.
@@ -252,10 +265,7 @@ async def play_next(guild):
         vc.play(audio, after=lambda e=None: after_play(guild))
 
         if console is not None:
-            embed = discord.Embed(title='Ahora estás escuchando: ' + source['title'],
-                                  url='https://www.youtube.com/watch?v=' + source['id'])
-            embed.set_image(url=source['thumbnail'])
-            await edit_console(state, content=check_playlist(state.queue), embed=embed)
+            await edit_console(state, content=check_playlist(state.queue), embed=now_playing_embed(source))
 
         if state.queue and not state.queue[0]['extracted']:
             asyncio.create_task(prefetch_next(state))

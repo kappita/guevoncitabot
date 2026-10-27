@@ -20,18 +20,46 @@ def _spotify_client():
     return _spoti_api
 
 
-def _youtube(original, parsed, query):
+# Every playlist ID YouTube generates by itself (Mixes, radios, "My Mix",
+# YouTube Music radio/curated lists) starts with "RD". User-made playlists
+# use other prefixes (PL, OLAK5uy_ albums, UU uploads, ...).
+def _is_auto_playlist(list_id, query):
+    return list_id.startswith('RD') or 'start_radio' in query
+
+
+# Radio IDs are usually the seed video's ID with a prefix, e.g. RD<id> or RDAMVM<id>.
+def _radio_seed(list_id):
+    for prefix in ('RDAMVM', 'RDAO', 'RD'):
+        rest = list_id[len(prefix):]
+        if list_id.startswith(prefix) and len(rest) == 11:
+            return rest
+    return None
+
+
+def _song(original, vid):
+    return {'mediaSource': 'youtube', 'type': 'song', 'url': original,
+            'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
+
+
+def _youtube(original, parsed, query, vid=None):
     path = parsed.path
-    if path.startswith('/playlist') or 'list' in query:
+    vid = vid or query.get('v', [None])[0]
+    list_id = query.get('list', [''])[0]
+
+    if list_id and _is_auto_playlist(list_id, query):
+        vid = vid or _radio_seed(list_id)
+        if vid:
+            return _song(original, vid)
+        raise ValueError('auto-generated YouTube playlist without a video: ' + original)
+
+    if list_id:
         return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original,
-                'entries': [{'url': original}]}
+                'entries': [{'url': 'https://www.youtube.com/playlist?list=' + list_id}]}
     if path.startswith('/shorts/'):
         return {'mediaSource': 'youtube', 'type': 'short', 'url': original,
                 'entries': [{'url': original}]}
-    vid = query.get('v', [None])[0]
     if vid:
-        return {'mediaSource': 'youtube', 'type': 'song', 'url': original,
-                'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
+        return _song(original, vid)
     return None
 
 
@@ -77,12 +105,8 @@ def YTid(link):
 
     result = None
     if host.endswith('youtube.com') or host == 'youtu.be':
-        if host == 'youtu.be':
-            vid = parsed.path.lstrip('/')
-            result = {'mediaSource': 'youtube', 'type': 'song', 'url': original,
-                      'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
-        else:
-            result = _youtube(original, parsed, query)
+        vid = parsed.path.strip('/') if host == 'youtu.be' else None
+        result = _youtube(original, parsed, query, vid)
     elif host.endswith('spotify.com'):
         result = _spotify(original, parsed)
     elif host.endswith('tidal.com'):
@@ -102,6 +126,21 @@ def _demo():
     assert YTid('https://www.youtube.com/shorts/xyz')['type'] == 'short'
     assert YTid('https://www.youtube.com/playlist?list=PL1')['type'] == 'playlist'
     assert YTid('https://www.youtube.com/watch?v=a&list=PL1')['type'] == 'playlist'
+    assert YTid('https://youtu.be/a?list=PL1')['type'] == 'playlist'
+    assert YTid('https://www.youtube.com/watch?v=a&list=OLAK5uy_x')['type'] == 'playlist'
+    mix = YTid('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1')
+    assert mix['type'] == 'song'
+    assert mix['entries'][0]['url'] == 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+    assert YTid('https://youtu.be/dQw4w9WgXcQ?list=RDdQw4w9WgXcQ')['type'] == 'song'
+    assert YTid('https://www.youtube.com/watch?v=abc&list=RDMM')['type'] == 'song'
+    assert YTid('https://music.youtube.com/watch?v=abc&list=RDAMVMabc')['type'] == 'song'
+    seed = YTid('https://www.youtube.com/playlist?list=RDdQw4w9WgXcQ')
+    assert seed['entries'][0]['url'] == 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+    try:
+        YTid('https://www.youtube.com/playlist?list=RDCLAK5uy_abcdefghijklmnop')
+        assert False, 'radio without a seed video should be rejected'
+    except ValueError:
+        pass
     assert YTid('https://music.youtube.com/watch?v=abc123')['type'] == 'song'
     assert YTid('daft punk one more time')['type'] == 'search'
     assert YTid('daft punk one more time')['mediaSource'] == 'youtube'

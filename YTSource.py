@@ -1,5 +1,6 @@
 import os
 
+import requests
 import yt_dlp
 
 POT_PROVIDER_URL = os.getenv('YTDL_POT_PROVIDER_URL', '')
@@ -37,6 +38,19 @@ def describe():
             f'pot_provider={POT_PROVIDER_URL or "none"}, cookies={cookies}')
 
 
+# yt-dlp prefers vi_webp/*.webp thumbnails, which Discord embeds don't reliably
+# render, so use the plain JPEG variants. maxresdefault doesn't exist for every
+# video; hqdefault always does.
+def _thumbnail(video_id):
+    maxres = f'https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg'
+    try:
+        if requests.head(maxres, timeout=3).status_code == 200:
+            return maxres
+    except requests.RequestException:
+        pass
+    return f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg'
+
+
 # Downloads the song data and returns it
 def getSongSource(link: str) -> dict:
     with yt_dlp.YoutubeDL(_options(False)) as ydl:
@@ -44,7 +58,9 @@ def getSongSource(link: str) -> dict:
         if '_type' in info:
             info = info['entries'][0]
         return {'extracted': True, 'source': info['url'], 'id': info['id'],
-                'thumbnail': info['thumbnail'], 'title': info['title']}
+                'thumbnail': _thumbnail(info['id']),
+                'webpage_url': info.get('webpage_url') or 'https://www.youtube.com/watch?v=' + info['id'],
+                'title': info['title']}
 
 
 # Gets the playlist data, exactly, the title and url of every song.
