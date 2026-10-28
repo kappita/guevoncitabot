@@ -35,6 +35,16 @@ LEGACY_CONSOLE = 890656775915835392
 
 FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
 
+IDLE_IMAGE = 'https://i.pinimg.com/474x/2f/52/35/2f523539d3afc380ab6d3ebfe339b32e.jpg'
+SUPPORTED_PLATFORMS = (
+    '**YouTube**: videos, shorts y playlists\n'
+    '**YouTube Music**: canciones, álbumes y playlists\n'
+    '**Spotify**: canciones y playlists\n'
+    '**Tidal**: canciones y playlists\n'
+    '**Apple Music**: canciones, álbumes y playlists\n'
+    'También puedes escribir el nombre de una canción para buscarla en YouTube.'
+)
+
 _config = {}
 _guilds = {}
 
@@ -166,7 +176,7 @@ async def holiday_refresher():
 def check_playlist(queue):
     if not queue:
         return ('No hay nada en la cola de reproducción. \n'
-                'Agrega canciones escribiendo links de YouTube en el chat.')
+                'Agrega canciones escribiendo un link o el nombre de una canción en el chat.')
     if len(queue) > 10:
         lines = [f'{10 - i}.- ' + queue[9 - i]['title'] for i in range(10)]
         return 'La playlist es:\n y ' + str(len(queue) - 10) + ' canciones más \n' + '\n'.join(lines)
@@ -194,7 +204,7 @@ async def ensure_console(guild, state):
             return state.console_message
         except discord.NotFound:
             pass
-    state.console_message = await channel.send('Cola de reproducción lista.')
+    state.console_message = await channel.send(embed=idle_embed(), view=ControlView(idle=True))
     cfg['console_message_id'] = state.console_message.id
     save_config()
     return state.console_message
@@ -217,6 +227,106 @@ def now_playing_embed(source):
     embed = discord.Embed(title=('Ahora estás escuchando: ' + source['title'])[:256], url=url)
     embed.set_image(url=source['thumbnail'])
     return embed
+
+
+def idle_embed():
+    embed = discord.Embed(title='No estoy tocando nada en este momento',
+                          description='Escribe en este canal un link o el nombre de una canción para empezar.')
+    embed.add_field(name='Plataformas soportadas', value=SUPPORTED_PLATFORMS, inline=False)
+    embed.set_image(url=IDLE_IMAGE)
+    return embed
+
+
+async def show_idle(state):
+    await edit_console(state, content='', embed=idle_embed(), view=ControlView(idle=True))
+
+
+# custom_ids are fixed so the buttons keep working after a restart (see add_view in on_ready).
+class ControlView(discord.ui.View):
+    def __init__(self, paused=False, idle=False):
+        super().__init__(timeout=None)
+        self.toggle_pause.label = 'Reanudar' if paused else 'Pausa'
+        self.toggle_pause.emoji = '▶️' if paused else '⏸️'
+        for item in (self.toggle_pause, self.skip, self.clear):
+            item.disabled = idle
+
+    @discord.ui.button(label='Pausa', emoji='⏸️', style=discord.ButtonStyle.primary,
+                       custom_id='guevoncita:pause')
+    async def toggle_pause(self, interaction, button):
+        await handle_control(interaction, 'pause')
+
+    @discord.ui.button(label='Saltar', emoji='⏭️', style=discord.ButtonStyle.secondary,
+                       custom_id='guevoncita:skip')
+    async def skip(self, interaction, button):
+        await handle_control(interaction, 'skip')
+
+    @discord.ui.button(label='Limpiar cola', emoji='🧹', style=discord.ButtonStyle.secondary,
+                       custom_id='guevoncita:clear')
+    async def clear(self, interaction, button):
+        await handle_control(interaction, 'clear')
+
+    @discord.ui.button(label='Desconectar', emoji='⏹️', style=discord.ButtonStyle.danger,
+                       custom_id='guevoncita:disconnect')
+    async def disconnect(self, interaction, button):
+        await handle_control(interaction, 'disconnect')
+
+
+async def pause_playback(vc, state):
+    if vc.is_playing():
+        vc.pause()
+        await edit_console(state, view=ControlView(paused=True))
+
+
+async def resume_playback(vc, state):
+    if vc.is_paused():
+        vc.resume()
+        await edit_console(state, view=ControlView())
+
+
+async def clear_queue(vc, state):
+    async with state.lock:
+        state.queue.clear()
+    if vc.is_playing() or vc.is_paused():
+        await edit_console(state, content=check_playlist(state.queue))
+    else:
+        await show_idle(state)
+
+
+async def disconnect_voice(guild, state):
+    async with state.lock:
+        state.queue.clear()
+    # Not under the lock: stopping the player fires after_play, which needs it.
+    if guild.voice_client is not None:
+        await guild.voice_client.disconnect()
+    await show_idle(state)
+
+
+async def handle_control(interaction, action):
+    guild = interaction.guild
+    vc = guild.voice_client if guild else None
+    if vc is None or not vc.is_connected():
+        await interaction.response.send_message('No estoy conectada a un canal de voz.', ephemeral=True)
+        return
+    if getattr(interaction.user.voice, 'channel', None) != vc.channel:
+        await interaction.response.send_message('Debes estar en mi canal de voz para usar los controles.',
+                                                ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    state = state_for(guild.id)
+    await ensure_console(guild, state)
+    stats["commands"] += 1
+    if action == 'pause':
+        if vc.is_paused():
+            await resume_playback(vc, state)
+        else:
+            await pause_playback(vc, state)
+    elif action == 'skip':
+        vc.stop()
+    elif action == 'clear':
+        await clear_queue(vc, state)
+    elif action == 'disconnect':
+        await disconnect_voice(guild, state)
 
 
 # Runs in the voice thread when a track ends, so it hops back onto the event loop.
@@ -251,10 +361,7 @@ async def play_next(guild):
 
         if not state.queue:
             if console is not None:
-                embed = discord.Embed(title='No estoy tocando nada en este momento. \n'
-                                            'Coloca alguna canción escribiendo su link de YouTube en el chat')
-                embed.set_image(url='https://i.ytimg.com/vi/86O_FZ1Ph4I/maxresdefault.jpg')
-                await edit_console(state, content='', embed=embed)
+                await show_idle(state)
             return
 
         source = state.queue.pop(0)
@@ -265,7 +372,8 @@ async def play_next(guild):
         vc.play(audio, after=lambda e=None: after_play(guild))
 
         if console is not None:
-            await edit_console(state, content=check_playlist(state.queue), embed=now_playing_embed(source))
+            await edit_console(state, content=check_playlist(state.queue), embed=now_playing_embed(source),
+                               view=ControlView())
 
         if state.queue and not state.queue[0]['extracted']:
             asyncio.create_task(prefetch_next(state))
@@ -384,6 +492,7 @@ async def on_ready():
     global _status_started
     if not _status_started:
         _status_started = True
+        client.add_view(ControlView())
         asyncio.create_task(start_status_server())
         asyncio.create_task(announcer())
         asyncio.create_task(holiday_refresher())
@@ -407,6 +516,13 @@ async def on_ready():
                     await msg.delete()
         except discord.HTTPException:
             pass
+
+        # on_ready also fires on gateway reconnects, so leave a playing console alone.
+        vc = guild.voice_client
+        if vc is None or not (vc.is_playing() or vc.is_paused()):
+            state = state_for(guild.id)
+            if await ensure_console(guild, state) is not None:
+                await show_idle(state)
 
 
 @client.event
@@ -451,11 +567,11 @@ async def on_message(message):
 
     low = content.lower()
     if low in ('pause', 'pausa'):
-        vc.pause()
+        await pause_playback(vc, state)
         stats["commands"] += 1
         return
     if low == 'resume':
-        vc.resume()
+        await resume_playback(vc, state)
         stats["commands"] += 1
         return
     if low == 'skip':
@@ -463,11 +579,8 @@ async def on_message(message):
         stats["commands"] += 1
         return
     if low == 'clear':
-        async with state.lock:
-            state.queue.clear()
+        await clear_queue(vc, state)
         stats["commands"] += 1
-        await edit_console(state, content='No hay nada en la cola de reproducción. \n'
-                                          'Agrega canciones escribiendo links de YouTube en el chat.', embed=None)
         return
 
     try:
