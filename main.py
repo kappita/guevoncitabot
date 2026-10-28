@@ -37,7 +37,7 @@ FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconne
 
 IDLE_IMAGE = 'https://i.pinimg.com/474x/2f/52/35/2f523539d3afc380ab6d3ebfe339b32e.jpg'
 SUPPORTED_PLATFORMS = (
-    '**YouTube**: videos, shorts y playlists\n'
+    '**YouTube**: videos y playlists\n'
     '**YouTube Music**: canciones, álbumes y playlists\n'
     '**Spotify**: canciones y playlists\n'
     '**Tidal**: canciones y playlists\n'
@@ -383,7 +383,7 @@ async def sources_from_url(url):
     media = url['mediaSource']
     sources = []
     if media == 'youtube':
-        if url['type'] in ('short', 'song'):
+        if url['type'] == 'song':
             sources.append(await asyncio.to_thread(getSongSource, url['entries'][0]['url']))
         elif url['type'] == 'playlist':
             sources.extend(await asyncio.to_thread(getPlaylistSource, url['entries'][0]['url']))

@@ -59,6 +59,8 @@ def _youtube(original, parsed, query, vid=None):
     path = parsed.path if parsed else ''
     if path.startswith('/browse/'):
         return _youtube_music_browse(original, path[len('/browse/'):].strip('/'))
+    if path.startswith('/shorts/'):
+        raise ValueError('YouTube Shorts are not supported: ' + original)
     vid = vid or query.get('v', [None])[0]
     list_id = query.get('list', [''])[0]
 
@@ -70,9 +72,6 @@ def _youtube(original, parsed, query, vid=None):
 
     if list_id:
         return _playlist(original, 'https://www.youtube.com/playlist?list=' + list_id)
-    if path.startswith('/shorts/'):
-        return {'mediaSource': 'youtube', 'type': 'short', 'url': original,
-                'entries': [{'url': original}]}
     if vid:
         return _song(original, vid)
     return None
@@ -168,7 +167,12 @@ def YTid(link):
 def _demo():
     assert YTid('https://www.youtube.com/watch?v=abc123')['type'] == 'song'
     assert YTid('https://youtu.be/abc123')['type'] == 'song'
-    assert YTid('https://www.youtube.com/shorts/xyz')['type'] == 'short'
+    for short in ('https://www.youtube.com/shorts/xyz', 'https://youtube.com/shorts/xyz?si=abc&list=PL1'):
+        try:
+            YTid(short)
+            assert False, short + ' should be rejected'
+        except ValueError:
+            pass
     assert YTid('https://www.youtube.com/playlist?list=PL1')['type'] == 'playlist'
     assert YTid('https://www.youtube.com/watch?v=a&list=PL1')['type'] == 'playlist'
     assert YTid('https://youtu.be/a?list=PL1')['type'] == 'playlist'
