@@ -41,8 +41,24 @@ def _song(original, vid):
             'entries': [{'url': 'https://www.youtube.com/watch?v=' + vid}]}
 
 
+def _playlist(original, url):
+    return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original, 'entries': [{'url': url}]}
+
+
+# YouTube Music uses /browse/<id> for albums (MPREb_...), playlists (VL<list id>)
+# and artists (UC...).
+def _youtube_music_browse(original, browse_id):
+    if browse_id.startswith('VL'):
+        return _youtube(original, None, {'list': [browse_id[2:]]})
+    if browse_id.startswith('MPREb_'):
+        return _playlist(original, 'https://music.youtube.com/browse/' + browse_id)
+    raise ValueError('unsupported YouTube Music page: ' + original)
+
+
 def _youtube(original, parsed, query, vid=None):
-    path = parsed.path
+    path = parsed.path if parsed else ''
+    if path.startswith('/browse/'):
+        return _youtube_music_browse(original, path[len('/browse/'):].strip('/'))
     vid = vid or query.get('v', [None])[0]
     list_id = query.get('list', [''])[0]
 
@@ -53,8 +69,7 @@ def _youtube(original, parsed, query, vid=None):
         raise ValueError('auto-generated YouTube playlist without a video: ' + original)
 
     if list_id:
-        return {'mediaSource': 'youtube', 'type': 'playlist', 'url': original,
-                'entries': [{'url': 'https://www.youtube.com/playlist?list=' + list_id}]}
+        return _playlist(original, 'https://www.youtube.com/playlist?list=' + list_id)
     if path.startswith('/shorts/'):
         return {'mediaSource': 'youtube', 'type': 'short', 'url': original,
                 'entries': [{'url': original}]}
@@ -93,6 +108,34 @@ def _tidal(original, parsed):
     return None
 
 
+# music.apple.com/<country>/song/<slug>/<trackId>
+# music.apple.com/<country>/album/<slug>/<albumId>[?i=<trackId>]
+# music.apple.com/<country>/playlist/<slug>/pl.<id>
+# The slug is optional in all three.
+def _apple(original, parsed, query):
+    from AppleMusicSource import getAppleTrack, getAppleAlbum, getApplePlaylist
+    parts = [p for p in parsed.path.split('/') if p]
+    country = 'us'
+    if parts and len(parts[0]) == 2:
+        country = parts.pop(0)
+    if len(parts) < 2:
+        raise ValueError('unsupported Apple Music page: ' + original)
+    kind, item_id = parts[0], parts[-1]
+    track_id = query.get('i', [None])[0]
+
+    if kind == 'song' or (kind == 'album' and track_id):
+        return {'mediaSource': 'apple', 'type': 'song', 'url': original,
+                'entries': [getAppleTrack(track_id or item_id, country)]}
+    if kind == 'album':
+        return {'mediaSource': 'apple', 'type': 'playlist', 'url': original,
+                'entries': getAppleAlbum(item_id, country)}
+    if kind == 'playlist':
+        page = f'https://music.apple.com/{country}/playlist/{item_id}'
+        return {'mediaSource': 'apple', 'type': 'playlist', 'url': original,
+                'entries': getApplePlaylist(page)}
+    raise ValueError('unsupported Apple Music page: ' + original)
+
+
 ## Function to process links or search text
 def YTid(link):
     original = link.strip()
@@ -111,6 +154,8 @@ def YTid(link):
         result = _spotify(original, parsed)
     elif host.endswith('tidal.com'):
         result = _tidal(original, parsed)
+    elif host.endswith('music.apple.com'):
+        result = _apple(original, parsed, query)
 
     if result is not None:
         return result
@@ -142,6 +187,18 @@ def _demo():
     except ValueError:
         pass
     assert YTid('https://music.youtube.com/watch?v=abc123')['type'] == 'song'
+    album = YTid('https://music.youtube.com/browse/MPREb_7ltM34kr0mH')
+    assert album['type'] == 'playlist'
+    assert album['entries'][0]['url'] == 'https://music.youtube.com/browse/MPREb_7ltM34kr0mH'
+    vl = YTid('https://music.youtube.com/browse/VLPL9A1600EA18716662')
+    assert vl['entries'][0]['url'] == 'https://www.youtube.com/playlist?list=PL9A1600EA18716662'
+    for rejected in ('https://music.youtube.com/browse/VLRDCLAK5uy_abcdefghijklmnop',
+                     'https://music.youtube.com/browse/UCRr1xG_2WIDs18a6cIiCxeA'):
+        try:
+            YTid(rejected)
+            assert False, rejected + ' should be rejected'
+        except ValueError:
+            pass
     assert YTid('daft punk one more time')['type'] == 'search'
     assert YTid('daft punk one more time')['mediaSource'] == 'youtube'
     print('YTLink demo OK')

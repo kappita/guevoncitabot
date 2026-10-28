@@ -281,7 +281,7 @@ async def sources_from_url(url):
             sources.extend(await asyncio.to_thread(getPlaylistSource, url['entries'][0]['url']))
         elif url['type'] == 'search':
             sources.append(await asyncio.to_thread(getSongSource, url['entries'][0]['search']))
-    elif media in ('spotify', 'tidal'):
+    elif media in ('spotify', 'tidal', 'apple'):
         if url['type'] == 'song':
             source = await asyncio.to_thread(getSongSource, url['entries'][0]['search'])
             source['title'] = url['entries'][0]['title']

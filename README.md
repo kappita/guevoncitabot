@@ -8,7 +8,7 @@ Discord music bot (multi-guild) with birthdays and Chilean holiday announcements
 - `!setholidays #canal` — set the holiday-announcement channel (Manage Server).
 - `!birthday DD/MM` / `!birthday` / `!birthday borrar` — save / show / clear your birthday.
 - `!nextbirthday`, `!nextholiday` — next upcoming birthday / holiday.
-- Bare `pause`/`pausa`, `resume`, `skip`, `clear`, and YouTube/Spotify/Tidal links in the music channel.
+- Bare `pause`/`pausa`, `resume`, `skip`, `clear`, and YouTube/YouTube Music/Spotify/Tidal/Apple Music links in the music channel.
 
 ## YouTube authentication
 
